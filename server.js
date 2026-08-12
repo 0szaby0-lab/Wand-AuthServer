@@ -1,65 +1,147 @@
 require('dotenv').config();
 const express = require('express');
+const mongoose = require('mongoose');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Middleware
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
-// Load allowed identities from an environment variable, separated by commas.
-// E.g., ALLOWED_USERS="Szaby-PC\\Szaby,LO-PC\\LO,test-pc\\testuser"
-const allowedUsersEnv = process.env.ALLOWED_USERS || "";
-const allowedUsers = allowedUsersEnv.split(',').map(u => u.trim().toLowerCase()).filter(u => u.length > 0);
+// Serve static admin files
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Global killswitch, if set to "false", no one can run it.
-const globalKillswitch = process.env.IS_RUNNING_ALLOWED !== "false";
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+}).then(() => console.log('✅ MongoDB connected!'))
+  .catch(err => console.error('❌ MongoDB connection error:', err));
 
-// A simple GET endpoint so you can keep the server awake with UptimeRobot
-app.get('/', (req, res) => {
-    res.send('Wand Auth Server is awake and running! 🚀');
+// Database Schema (Subscription)
+const SubscriptionSchema = new mongoose.Schema({
+    hwid: { type: String, required: true, unique: true },
+    userName: String,
+    machineName: String,
+    createdAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, required: true }, // The timestamp when it expires
+    isActive: { type: Boolean, default: true } // Killswitch toggle
 });
 
-// A friendly message if someone opens the auth link in a browser
-app.get('/api/auth', (req, res) => {
-    res.send('This endpoint is for the Wand Enhancer app. (Only POST requests are accepted)');
+const Subscription = mongoose.model('Subscription', SubscriptionSchema);
+
+// ---------------------------
+// 1. Client Auth API
+// ---------------------------
+app.post('/api/auth', async (req, res) => {
+    try {
+        const { hwid, userName, machineName } = req.body;
+        
+        if (!hwid) {
+            return res.json({ authorized: false, message: 'Hibás kliens, a HWID hiányzik!' });
+        }
+
+        const sub = await Subscription.findOne({ hwid });
+
+        if (!sub) {
+            return res.json({ authorized: false, message: 'Nincs előfizetésed ehhez a számítógéphez!' });
+        }
+
+        if (!sub.isActive) {
+            return res.json({ authorized: false, message: 'Az adminisztrátor visszavonta a hozzáférésed!' });
+        }
+
+        if (new Date() > sub.expiresAt) {
+            sub.isActive = false; // Auto-deactivate
+            await sub.save();
+            return res.json({ authorized: false, message: 'Az előfizetésed lejárt! Kérlek hosszabbíts!' });
+        }
+
+        // Auto update their username just in case they changed it
+        sub.userName = userName;
+        sub.machineName = machineName;
+        await sub.save();
+
+        return res.json({ authorized: true, message: 'Sikeres azonosítás.' });
+
+    } catch (err) {
+        console.error(err);
+        return res.json({ authorized: false, message: 'Szerver hiba az azonosítás során.' });
+    }
 });
 
-app.post('/api/auth', (req, res) => {
-    const { machineName, userName } = req.body;
+// ---------------------------
+// 2. Admin API
+// ---------------------------
+// A very simple hardcoded password check for the admin panel API (for your safety)
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'secret-wand-admin-password';
 
-    console.log(`Received auth request from: Machine=${machineName}, User=${userName}`);
+const checkAdmin = (req, res, next) => {
+    const pwd = req.headers['x-admin-password'];
+    if (pwd === ADMIN_PASSWORD) return next();
+    return res.status(401).json({ error: 'Hibás admin jelszó!' });
+};
 
-    if (!machineName || !userName) {
-        return res.status(400).json({ authorized: false, message: "Missing machineName or userName." });
-    }
+// Get all subscriptions
+app.get('/api/admin/subs', checkAdmin, async (req, res) => {
+    const subs = await Subscription.find().sort({ createdAt: -1 });
+    res.json(subs);
+});
 
-    if (!globalKillswitch) {
-        console.log("Access denied: Global killswitch is active.");
-        return res.json({ authorized: false, message: "A szerver jelenleg le van állítva." });
-    }
-
-    const identity = `${machineName}\\${userName}`.toLowerCase();
-
-    // If allowedUsers array is empty, we allow everyone (or you can change it to deny everyone).
-    // Let's deny if the list is empty to be secure.
-    if (allowedUsers.length === 0) {
-        console.log("No allowed users configured. Denying access.");
-        return res.json({ authorized: false, message: `Nincs senki engedélyezve a szerveren.\n\nAz azonosítód: ${identity}` });
-    }
-
-    if (allowedUsers.includes(identity)) {
-        console.log(`Access granted to: ${identity}`);
-        return res.json({ authorized: true, message: "Welcome!" });
+// Add or Extend Subscription
+app.post('/api/admin/subs', checkAdmin, async (req, res) => {
+    const { hwid, daysToAdd, userName, machineName } = req.body;
+    
+    let sub = await Subscription.findOne({ hwid });
+    
+    const additionalMs = daysToAdd * 24 * 60 * 60 * 1000;
+    
+    if (sub) {
+        // Extend existing
+        let currentExpiry = sub.expiresAt.getTime();
+        // If it was already expired, start counting from today instead of from the past
+        if (currentExpiry < Date.now()) currentExpiry = Date.now();
+        
+        sub.expiresAt = new Date(currentExpiry + additionalMs);
+        sub.isActive = true; // Make sure it's active again
     } else {
-        console.log(`Access denied to: ${identity}`);
-        return res.json({ authorized: false, message: `Nincs engedélyed a futtatáshoz!\n\nAz azonosítód: ${identity}` });
+        // Create new
+        sub = new Subscription({
+            hwid,
+            userName,
+            machineName,
+            expiresAt: new Date(Date.now() + additionalMs),
+            isActive: true
+        });
     }
+
+    await sub.save();
+    res.json(sub);
 });
 
+// Toggle / Revoke (Killswitch)
+app.put('/api/admin/subs/:id/toggle', checkAdmin, async (req, res) => {
+    const sub = await Subscription.findById(req.params.id);
+    if (!sub) return res.status(404).json({ error: 'Not found' });
+    
+    sub.isActive = !sub.isActive;
+    await sub.save();
+    res.json(sub);
+});
+
+// Delete Subscription completely
+app.delete('/api/admin/subs/:id', checkAdmin, async (req, res) => {
+    await Subscription.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+});
+
+
+// Fallback to admin UI
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Wand Auth Server is running on port ${PORT}`);
-    console.log(`Allowed users:`, allowedUsers.length > 0 ? allowedUsers : "NONE - PLEASE SET ALLOWED_USERS ENV VARIABLE");
+    console.log(`🚀 Wand Elite Auth Server fut ezen a porton: ${PORT}`);
 });
