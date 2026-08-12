@@ -47,7 +47,7 @@ app.post('/api/auth', (req, res) => {
     // Let's deny if the list is empty to be secure.
     if (allowedUsers.length === 0) {
         console.log("No allowed users configured. Denying access.");
-        return res.json({ authorized: false, message: "Nincs senki engedélyezve a szerveren." });
+        return res.json({ authorized: false, message: `Nincs senki engedélyezve a szerveren.\n\nAz azonosítód: ${identity}` });
     }
 
     if (allowedUsers.includes(identity)) {
@@ -55,7 +55,7 @@ app.post('/api/auth', (req, res) => {
         return res.json({ authorized: true, message: "Welcome!" });
     } else {
         console.log(`Access denied to: ${identity}`);
-        return res.json({ authorized: false, message: "Nincs engedélyed a futtatáshoz!" });
+        return res.json({ authorized: false, message: `Nincs engedélyed a futtatáshoz!\n\nAz azonosítód: ${identity}` });
     }
 });
 
