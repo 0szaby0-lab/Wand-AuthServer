@@ -17,6 +17,16 @@ const allowedUsers = allowedUsersEnv.split(',').map(u => u.trim().toLowerCase())
 // Global killswitch, if set to "false", no one can run it.
 const globalKillswitch = process.env.IS_RUNNING_ALLOWED !== "false";
 
+// A simple GET endpoint so you can keep the server awake with UptimeRobot
+app.get('/', (req, res) => {
+    res.send('Wand Auth Server is awake and running! 🚀');
+});
+
+// A friendly message if someone opens the auth link in a browser
+app.get('/api/auth', (req, res) => {
+    res.send('This endpoint is for the Wand Enhancer app. (Only POST requests are accepted)');
+});
+
 app.post('/api/auth', (req, res) => {
     const { machineName, userName } = req.body;
 
