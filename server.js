@@ -137,7 +137,7 @@ app.delete('/api/admin/subs/:id', checkAdmin, async (req, res) => {
 
 
 // Fallback to admin UI
-app.get('*', (req, res) => {
+app.use((req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
